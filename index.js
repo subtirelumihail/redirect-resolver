@@ -106,6 +106,15 @@ export default {
     let redirectCount = 0;
     let finalStatus = 200;
 
+    // First, check if it's a Google News RSS article URL and try to decode it
+    if (currentUrl.includes("news.google.com/rss/articles/")) {
+      const decodedUrl = this.decodeGoogleNewsRSSUrl(currentUrl);
+      if (decodedUrl && decodedUrl !== currentUrl) {
+        currentUrl = decodedUrl;
+        redirectCount++;
+      }
+    }
+
     for (let i = 0; i < maxRedirects; i++) {
       try {
         // Enhanced headers for better compatibility with Google News and other services
@@ -175,6 +184,56 @@ export default {
     };
   },
 
+  decodeGoogleNewsRSSUrl(url) {
+    try {
+      // Extract the article ID from Google News RSS URLs
+      const match = url.match(/\/articles\/([A-Za-z0-9_-]+)/);
+      if (!match) return null;
+
+      const articleId = match[1];
+
+      // Google News RSS article IDs often start with "CBM" and contain base64-encoded data
+      if (articleId.startsWith("CBM")) {
+        try {
+          // Remove the CBM prefix and decode
+          const encodedData = articleId.substring(3);
+
+          // Add padding if needed for base64
+          let paddedData = encodedData;
+          while (paddedData.length % 4) {
+            paddedData += "=";
+          }
+
+          // Replace URL-safe base64 characters
+          paddedData = paddedData.replace(/-/g, "+").replace(/_/g, "/");
+
+          // Decode base64
+          const decodedBytes = atob(paddedData);
+
+          // Look for URL patterns in the decoded data
+          const urlPattern = /https?:\/\/[^\s<>"']+/g;
+          const urls = decodedBytes.match(urlPattern);
+
+          if (urls && urls.length > 0) {
+            // Return the first valid URL found
+            return urls[0];
+          }
+        } catch (decodeError) {
+          console.error(
+            "Failed to decode Google News article ID:",
+            decodeError
+          );
+        }
+      }
+
+      // Alternative: Try to construct a direct Google News article URL
+      return `https://news.google.com/articles/${articleId}`;
+    } catch (error) {
+      console.error("Failed to process Google News RSS URL:", error);
+      return null;
+    }
+  },
+
   async extractGoogleNewsUrl(response, currentUrl) {
     try {
       // For Google News, sometimes we need to parse the response to find the actual article URL
@@ -186,26 +245,30 @@ export default {
         /href="(https?:\/\/[^"]*)"[^>]*data-n-href/,
         /<a[^>]+href="(https?:\/\/(?!news\.google\.com)[^"]+)"/,
         /window\.location\.href\s*=\s*["']([^"']+)["']/,
+        /"url":"(https?:\/\/[^"]+)"/,
+        /data-url="(https?:\/\/[^"]+)"/,
       ];
 
       for (const pattern of urlPatterns) {
         const match = text.match(pattern);
         if (match && match[1]) {
           const extractedUrl = match[1];
-          // Decode HTML entities
+          // Decode HTML entities and URL encoding
           const decodedUrl = extractedUrl
             .replace(/&amp;/g, "&")
             .replace(/&lt;/g, "<")
             .replace(/&gt;/g, ">")
             .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'");
+            .replace(/&#39;/g, "'")
+            .replace(/\\u003d/g, "=")
+            .replace(/\\u0026/g, "&");
 
           // Validate it's a proper URL and not just a Google News URL
           if (
             decodedUrl.startsWith("http") &&
             !decodedUrl.includes("news.google.com")
           ) {
-            return decodedUrl;
+            return decodeURIComponent(decodedUrl);
           }
         }
       }
