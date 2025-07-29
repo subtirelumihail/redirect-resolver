@@ -1,9 +1,9 @@
-name = "resolve-redirect"
+name = "redirect-resolver"
 main = "index.js"
 compatibility_date = "2024-01-01"
 
 [env.production]
-name = "resolve-redirect"
+name = "redirect-resolver"
 
 [env.development]
-name = "resolve-redirect-dev"
+name = "redirect-resolver-dev"
