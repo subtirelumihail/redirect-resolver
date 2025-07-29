@@ -1,3 +1,82 @@
+const fetchDecodedBatchExecute = (id) => {
+  const s =
+    '[[["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"' +
+    id +
+    '\\"]",null,"generic"]]]';
+
+  return fetch(
+    "https://news.google.com/_/DotsSplashUi/data/batchexecute?" +
+      "rpcids=Fbv4je",
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+        Referrer: "https://news.google.com/",
+      },
+      body: "f.req=" + encodeURIComponent(s),
+      method: "POST",
+    }
+  )
+    .then((e) => e.text())
+    .then((s) => {
+      const header = '[\\"garturlres\\",\\"';
+      const footer = '\\",';
+      if (!s.includes(header)) {
+        throw new Error("header not found: " + s);
+      }
+      const start = s.substring(s.indexOf(header) + header.length);
+      if (!start.includes(footer)) {
+        throw new Error("footer not found");
+      }
+      const url = start.substring(0, start.indexOf(footer));
+      return url;
+    });
+};
+
+const decodeGoogleNewsUrl = async (sourceUrl) => {
+  const url = new URL(sourceUrl);
+  const path = url.pathname.split("/");
+  if (
+    url.hostname === "news.google.com" &&
+    path.length > 1 &&
+    path[path.length - 2] === "articles"
+  ) {
+    const base64 = path[path.length - 1];
+    let str = atob(base64);
+
+    const prefix = String.fromCharCode(0x08, 0x13, 0x22);
+    if (str.startsWith(prefix)) {
+      str = str.substring(prefix.length);
+    }
+
+    const suffix = String.fromCharCode(0xd2, 0x01, 0x00);
+    if (str.endsWith(suffix)) {
+      str = str.substring(0, str.length - suffix.length);
+    }
+
+    // One or two bytes to skip
+    const bytes = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) {
+      bytes[i] = str.charCodeAt(i);
+    }
+    const len = bytes[0];
+    if (len >= 0x80) {
+      str = str.substring(2, len + 2);
+    } else {
+      str = str.substring(1, len + 1);
+    }
+
+    if (str.startsWith("AU_yqL")) {
+      // New style encoding, introduced in July 2024. Not yet known how to decode offline.
+      const url = await fetchDecodedBatchExecute(base64);
+      return url;
+    }
+
+    return str;
+  } else {
+    return sourceUrl;
+  }
+};
+
 export default {
   async fetch(request) {
     try {
@@ -66,30 +145,25 @@ export default {
         );
       }
 
-      // Special handling for Google News URLs
-      if (
-        url.includes("news.google.com") &&
-        (url.includes("/articles/") || url.includes("/rss/articles/"))
-      ) {
-        const decodedUrl = await this.decodeGoogleNewsUrl(url);
-        if (decodedUrl && decodedUrl !== url) {
-          return new Response(
-            JSON.stringify({
-              original_url: url,
-              final_url: decodedUrl,
-              status_code: 200,
-              redirected: true,
-              redirect_count: 1,
-              method: "google_news_decode",
-            }),
-            {
-              headers: {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
-              },
-            }
-          );
-        }
+      // Try Google News decoding first
+      const decodedUrl = await decodeGoogleNewsUrl(url);
+      if (decodedUrl !== url) {
+        return new Response(
+          JSON.stringify({
+            original_url: url,
+            final_url: decodedUrl,
+            status_code: 200,
+            redirected: true,
+            redirect_count: 1,
+            method: "google_news_decode",
+          }),
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*",
+            },
+          }
+        );
       }
 
       // Enhanced fetch for other redirects
@@ -125,130 +199,6 @@ export default {
           },
         }
       );
-    }
-  },
-
-  /**
-   * Google News URL decoder based on the working implementation
-   * from https://gist.github.com/huksley/bc3cb046157a99cd9d1517b32f91a99e
-   */
-  async decodeGoogleNewsUrl(sourceUrl) {
-    try {
-      const url = new URL(sourceUrl);
-      const path = url.pathname.split("/");
-
-      // Check if this is a Google News article URL
-      if (
-        url.hostname === "news.google.com" &&
-        path.length > 1 &&
-        (path[path.length - 2] === "articles" ||
-          (path.includes("rss") && path.includes("articles")))
-      ) {
-        // Extract the base64 encoded part
-        let base64;
-        if (path.includes("rss")) {
-          // Handle RSS URLs: /rss/articles/CBM...
-          const articlesIndex = path.indexOf("articles");
-          if (articlesIndex >= 0 && articlesIndex + 1 < path.length) {
-            base64 = path[articlesIndex + 1].split("?")[0]; // Remove query params
-          }
-        } else {
-          // Handle direct article URLs: /articles/CBM...
-          base64 = path[path.length - 1].split("?")[0]; // Remove query params
-        }
-
-        if (!base64) return sourceUrl;
-
-        let str = atob(base64);
-
-        // Check for known prefixes and suffixes
-        const prefix = String.fromCharCode(0x08, 0x13, 0x22);
-        if (str.startsWith(prefix)) {
-          str = str.substring(prefix.length);
-        }
-
-        const suffix = String.fromCharCode(0xd2, 0x01, 0x00);
-        if (str.endsWith(suffix)) {
-          str = str.substring(0, str.length - suffix.length);
-        }
-
-        // Parse length bytes and extract URL
-        const bytes = new Uint8Array(str.length);
-        for (let i = 0; i < str.length; i++) {
-          bytes[i] = str.charCodeAt(i);
-        }
-
-        const len = bytes[0];
-        if (len >= 0x80) {
-          // Two-byte length encoding
-          str = str.substring(2, len + 2);
-        } else {
-          // One-byte length encoding
-          str = str.substring(1, len + 1);
-        }
-
-        // Check if this is a new style encoding (AU_yqL prefix)
-        if (str.startsWith("AU_yqL")) {
-          // Use Google's batchexecute API for new encoding
-          const decodedUrl = await this.fetchDecodedBatchExecute(base64);
-          return decodedUrl;
-        }
-
-        // Return the decoded URL for old style encoding
-        return str;
-      }
-
-      return sourceUrl;
-    } catch (error) {
-      console.error("Failed to decode Google News URL:", error);
-      return sourceUrl;
-    }
-  },
-
-  /**
-   * Uses Google's undocumented batchexecute protocol to decode new-style URLs
-   */
-  async fetchDecodedBatchExecute(id) {
-    try {
-      const s =
-        '[[["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"' +
-        id +
-        '\\"]",null,"generic"]]]';
-
-      const response = await fetch(
-        "https://news.google.com/_/DotsSplashUi/data/batchexecute?rpcids=Fbv4je",
-        {
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
-            Referrer: "https://news.google.com/",
-          },
-          body: "f.req=" + encodeURIComponent(s),
-          method: "POST",
-          signal: AbortSignal.timeout(10000),
-        }
-      );
-
-      const responseText = await response.text();
-
-      const header = '[\\"garturlres\\",\\"';
-      const footer = '\\",';
-
-      if (!responseText.includes(header)) {
-        throw new Error("Header not found in response");
-      }
-
-      const start = responseText.substring(
-        responseText.indexOf(header) + header.length
-      );
-      if (!start.includes(footer)) {
-        throw new Error("Footer not found in response");
-      }
-
-      const url = start.substring(0, start.indexOf(footer));
-      return url;
-    } catch (error) {
-      console.error("Failed to fetch decoded URL from batchexecute:", error);
-      throw error;
     }
   },
 
