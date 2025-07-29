@@ -18,29 +18,75 @@ const fetchDecodedBatchExecute = (id) => {
   )
     .then((e) => e.text())
     .then((s) => {
-      const header = '[\\"garturlres\\",\\"';
-      const footer = '\\",';
-      if (!s.includes(header)) {
-        throw new Error("header not found: " + s);
+      // Remove the security prefix )]}' if present
+      let responseText = s;
+      if (responseText.startsWith(")]}'\n\n")) {
+        responseText = responseText.substring(6);
       }
-      const start = s.substring(s.indexOf(header) + header.length);
-      if (!start.includes(footer)) {
-        throw new Error("footer not found");
+
+      // Try to parse the JSON response
+      try {
+        const parsed = JSON.parse(responseText);
+
+        // Look for the URL in the parsed response structure
+        if (parsed && Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (Array.isArray(item) && item.length >= 3) {
+              const data = item[2];
+              if (typeof data === "string") {
+                try {
+                  const innerParsed = JSON.parse(data);
+                  if (Array.isArray(innerParsed) && innerParsed.length >= 2) {
+                    const url = innerParsed[1];
+                    if (typeof url === "string" && url.startsWith("http")) {
+                      return url;
+                    }
+                  }
+                } catch (e) {
+                  // Continue searching
+                }
+              }
+            }
+          }
+        }
+      } catch (parseError) {
+        // Fallback to the original header/footer method
+        const header = '[\\"garturlres\\",\\"';
+        const footer = '\\",';
+        if (!responseText.includes(header)) {
+          throw new Error("header not found: " + responseText);
+        }
+        const start = responseText.substring(
+          responseText.indexOf(header) + header.length
+        );
+        if (!start.includes(footer)) {
+          throw new Error("footer not found");
+        }
+        const url = start.substring(0, start.indexOf(footer));
+        return url;
       }
-      const url = start.substring(0, start.indexOf(footer));
-      return url;
+
+      throw new Error("Could not extract URL from response: " + responseText);
     });
 };
 
 const decodeGoogleNewsUrl = async (sourceUrl) => {
   const url = new URL(sourceUrl);
   const path = url.pathname.split("/");
-  if (
-    url.hostname === "news.google.com" &&
-    path.length > 1 &&
-    path[path.length - 2] === "articles"
-  ) {
-    const base64 = path[path.length - 1];
+
+  // Handle both direct articles and RSS articles
+  let articlePath = null;
+  if (url.hostname === "news.google.com") {
+    if (path.includes("articles")) {
+      const articlesIndex = path.indexOf("articles");
+      if (articlesIndex >= 0 && articlesIndex + 1 < path.length) {
+        articlePath = path[articlesIndex + 1].split("?")[0]; // Remove query params
+      }
+    }
+  }
+
+  if (articlePath) {
+    const base64 = articlePath;
     let str = atob(base64);
 
     const prefix = String.fromCharCode(0x08, 0x13, 0x22);
