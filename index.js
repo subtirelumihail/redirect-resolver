@@ -66,7 +66,33 @@ export default {
         );
       }
 
-      // Enhanced fetch for Google News and other redirects
+      // Special handling for Google News URLs
+      if (
+        url.includes("news.google.com") &&
+        (url.includes("/articles/") || url.includes("/rss/articles/"))
+      ) {
+        const decodedUrl = await this.decodeGoogleNewsUrl(url);
+        if (decodedUrl && decodedUrl !== url) {
+          return new Response(
+            JSON.stringify({
+              original_url: url,
+              final_url: decodedUrl,
+              status_code: 200,
+              redirected: true,
+              redirect_count: 1,
+              method: "google_news_decode",
+            }),
+            {
+              headers: {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+              },
+            }
+          );
+        }
+      }
+
+      // Enhanced fetch for other redirects
       const finalUrl = await this.resolveRedirects(url);
 
       return new Response(
@@ -76,6 +102,7 @@ export default {
           status_code: finalUrl.status,
           redirected: url !== finalUrl.url,
           redirect_count: finalUrl.redirectCount,
+          method: "standard_redirect",
         }),
         {
           headers: {
@@ -101,33 +128,157 @@ export default {
     }
   },
 
-  async resolveRedirects(url, maxRedirects = 15) {
+  /**
+   * Google News URL decoder based on the working implementation
+   * from https://gist.github.com/huksley/bc3cb046157a99cd9d1517b32f91a99e
+   */
+  async decodeGoogleNewsUrl(sourceUrl) {
+    try {
+      const url = new URL(sourceUrl);
+      const path = url.pathname.split("/");
+
+      // Check if this is a Google News article URL
+      if (
+        url.hostname === "news.google.com" &&
+        path.length > 1 &&
+        (path[path.length - 2] === "articles" ||
+          (path.includes("rss") && path.includes("articles")))
+      ) {
+        // Extract the base64 encoded part
+        let base64;
+        if (path.includes("rss")) {
+          // Handle RSS URLs: /rss/articles/CBM...
+          const articlesIndex = path.indexOf("articles");
+          if (articlesIndex >= 0 && articlesIndex + 1 < path.length) {
+            base64 = path[articlesIndex + 1].split("?")[0]; // Remove query params
+          }
+        } else {
+          // Handle direct article URLs: /articles/CBM...
+          base64 = path[path.length - 1].split("?")[0]; // Remove query params
+        }
+
+        if (!base64) return sourceUrl;
+
+        let str = atob(base64);
+
+        // Check for known prefixes and suffixes
+        const prefix = String.fromCharCode(0x08, 0x13, 0x22);
+        if (str.startsWith(prefix)) {
+          str = str.substring(prefix.length);
+        }
+
+        const suffix = String.fromCharCode(0xd2, 0x01, 0x00);
+        if (str.endsWith(suffix)) {
+          str = str.substring(0, str.length - suffix.length);
+        }
+
+        // Parse length bytes and extract URL
+        const bytes = new Uint8Array(str.length);
+        for (let i = 0; i < str.length; i++) {
+          bytes[i] = str.charCodeAt(i);
+        }
+
+        const len = bytes[0];
+        if (len >= 0x80) {
+          // Two-byte length encoding
+          str = str.substring(2, len + 2);
+        } else {
+          // One-byte length encoding
+          str = str.substring(1, len + 1);
+        }
+
+        // Check if this is a new style encoding (AU_yqL prefix)
+        if (str.startsWith("AU_yqL")) {
+          // Use Google's batchexecute API for new encoding
+          const decodedUrl = await this.fetchDecodedBatchExecute(base64);
+          return decodedUrl;
+        }
+
+        // Return the decoded URL for old style encoding
+        return str;
+      }
+
+      return sourceUrl;
+    } catch (error) {
+      console.error("Failed to decode Google News URL:", error);
+      return sourceUrl;
+    }
+  },
+
+  /**
+   * Uses Google's undocumented batchexecute protocol to decode new-style URLs
+   */
+  async fetchDecodedBatchExecute(id) {
+    try {
+      const s =
+        '[[["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"' +
+        id +
+        '\\"]",null,"generic"]]]';
+
+      const response = await fetch(
+        "https://news.google.com/_/DotsSplashUi/data/batchexecute?rpcids=Fbv4je",
+        {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+            Referrer: "https://news.google.com/",
+          },
+          body: "f.req=" + encodeURIComponent(s),
+          method: "POST",
+          signal: AbortSignal.timeout(10000),
+        }
+      );
+
+      const responseText = await response.text();
+
+      const header = '[\\"garturlres\\",\\"';
+      const footer = '\\",';
+
+      if (!responseText.includes(header)) {
+        throw new Error("Header not found in response");
+      }
+
+      const start = responseText.substring(
+        responseText.indexOf(header) + header.length
+      );
+      if (!start.includes(footer)) {
+        throw new Error("Footer not found in response");
+      }
+
+      const url = start.substring(0, start.indexOf(footer));
+      return url;
+    } catch (error) {
+      console.error("Failed to fetch decoded URL from batchexecute:", error);
+      throw error;
+    }
+  },
+
+  async resolveRedirects(url, maxRedirects = 10) {
     let currentUrl = url;
     let redirectCount = 0;
     let finalStatus = 200;
 
-    // Special handling for Google News RSS URLs
-    if (currentUrl.includes("news.google.com/rss/articles/")) {
-      const decodedUrl = await this.handleGoogleNewsRSS(currentUrl);
-      if (decodedUrl && decodedUrl !== currentUrl) {
-        return {
-          url: decodedUrl,
-          status: 200,
-          redirectCount: 1,
-        };
-      }
-    }
-
     for (let i = 0; i < maxRedirects; i++) {
       try {
-        // Use different strategies based on the URL
-        let response;
-
-        if (currentUrl.includes("news.google.com")) {
-          response = await this.fetchGoogleNewsUrl(currentUrl);
-        } else {
-          response = await this.fetchRegularUrl(currentUrl);
-        }
+        const response = await fetch(currentUrl, {
+          method: "GET",
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            DNT: "1",
+            Connection: "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Cache-Control": "max-age=0",
+          },
+          redirect: "manual",
+          signal: AbortSignal.timeout(15000),
+        });
 
         finalStatus = response.status;
 
@@ -138,19 +289,6 @@ export default {
             // Handle relative URLs
             const newUrl = new URL(location, currentUrl);
             currentUrl = newUrl.href;
-            redirectCount++;
-            continue;
-          }
-        }
-
-        // For successful responses, try to extract final URLs from content
-        if (response.status === 200) {
-          const extractedUrl = await this.extractUrlFromResponse(
-            response,
-            currentUrl
-          );
-          if (extractedUrl && extractedUrl !== currentUrl) {
-            currentUrl = extractedUrl;
             redirectCount++;
             continue;
           }
@@ -172,180 +310,5 @@ export default {
       status: finalStatus,
       redirectCount,
     };
-  },
-
-  async handleGoogleNewsRSS(url) {
-    try {
-      // Extract the article ID
-      const match = url.match(/\/articles\/([A-Za-z0-9_-]+)/);
-      if (!match) return null;
-
-      const articleId = match[1];
-
-      // Try to decode CBM-prefixed IDs
-      if (articleId.startsWith("CBM")) {
-        const decodedUrl = this.decodeCBMUrl(articleId);
-        if (decodedUrl) return decodedUrl;
-      }
-
-      // Use Google's redirect service for the article
-      const redirectUrl = `https://news.google.com/articles/${articleId}?hl=en&gl=US`;
-
-      try {
-        const response = await fetch(redirectUrl, {
-          method: "HEAD", // Just get headers to avoid content parsing
-          headers: {
-            "User-Agent": "GoogleBot/2.1 (+http://www.google.com/bot.html)",
-          },
-          redirect: "manual",
-          signal: AbortSignal.timeout(10000),
-        });
-
-        if (response.status >= 300 && response.status < 400) {
-          const location = response.headers.get("Location");
-          if (location && !location.includes("google.com")) {
-            return location;
-          }
-        }
-      } catch (e) {
-        // If that fails, try alternative approach
-      }
-
-      return null;
-    } catch (error) {
-      console.error("Failed to handle Google News RSS URL:", error);
-      return null;
-    }
-  },
-
-  decodeCBMUrl(articleId) {
-    try {
-      // Remove CBM prefix
-      let encoded = articleId.substring(3);
-
-      // Add base64 padding
-      while (encoded.length % 4) {
-        encoded += "=";
-      }
-
-      // Replace URL-safe characters
-      encoded = encoded.replace(/-/g, "+").replace(/_/g, "/");
-
-      // Decode base64
-      const decoded = atob(encoded);
-
-      // Look for URLs in the decoded content
-      const urlRegex =
-        /https?:\/\/(?:[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=]|%[0-9A-Fa-f]{2})+/g;
-      const urls = decoded.match(urlRegex);
-
-      if (urls && urls.length > 0) {
-        // Return the first non-Google URL
-        for (const foundUrl of urls) {
-          if (
-            !foundUrl.includes("google.com") &&
-            !foundUrl.includes("youtube.com")
-          ) {
-            return foundUrl;
-          }
-        }
-      }
-
-      return null;
-    } catch (error) {
-      console.error("Failed to decode CBM URL:", error);
-      return null;
-    }
-  },
-
-  async fetchGoogleNewsUrl(url) {
-    return fetch(url, {
-      method: "GET",
-      headers: {
-        "User-Agent":
-          "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate",
-        DNT: "1",
-        Connection: "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-      },
-      redirect: "manual",
-      signal: AbortSignal.timeout(15000),
-    });
-  },
-
-  async fetchRegularUrl(url) {
-    return fetch(url, {
-      method: "GET",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        DNT: "1",
-        Connection: "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
-      },
-      redirect: "manual",
-      signal: AbortSignal.timeout(15000),
-    });
-  },
-
-  async extractUrlFromResponse(response, currentUrl) {
-    try {
-      const text = await response.text();
-
-      // Patterns to find redirect URLs
-      const patterns = [
-        /window\.location\.href\s*=\s*["']([^"']+)["']/,
-        /window\.location\s*=\s*["']([^"']+)["']/,
-        /location\.href\s*=\s*["']([^"']+)["']/,
-        /<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["']?\d+;\s*url=([^"'>]+)["']?/i,
-        /data-n-href=["']([^"']+)["']/,
-        /"url":"([^"]+)"/,
-        /href="(https?:\/\/[^"]+)"[^>]*data-n-href/,
-      ];
-
-      for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match && match[1]) {
-          let extractedUrl = match[1];
-
-          // Clean up the URL
-          extractedUrl = extractedUrl
-            .replace(/&amp;/g, "&")
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/\\u003d/g, "=")
-            .replace(/\\u0026/g, "&")
-            .replace(/\\/g, "");
-
-          // Validate and return if it's a different, valid URL
-          if (
-            extractedUrl.startsWith("http") &&
-            extractedUrl !== currentUrl &&
-            !extractedUrl.includes("google.com/sorry")
-          ) {
-            return decodeURIComponent(extractedUrl);
-          }
-        }
-      }
-
-      return null;
-    } catch (error) {
-      console.error("Failed to extract URL from response:", error);
-      return null;
-    }
   },
 };
