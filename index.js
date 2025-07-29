@@ -104,6 +104,92 @@ const tryDirectGoogleNewsRedirect = async (articleUrl) => {
   return null;
 };
 
+const decodeCBMUrl = (base64) => {
+  try {
+    let str = atob(base64);
+
+    // Check for known prefixes and remove them
+    const prefixes = [
+      String.fromCharCode(0x08, 0x13, 0x22), // Standard prefix
+      String.fromCharCode(0x08, 0x13), // Alternative prefix
+      String.fromCharCode(0x08), // Minimal prefix
+    ];
+
+    for (const prefix of prefixes) {
+      if (str.startsWith(prefix)) {
+        str = str.substring(prefix.length);
+        break;
+      }
+    }
+
+    // Check for known suffixes and remove them
+    const suffixes = [
+      String.fromCharCode(0xd2, 0x01, 0x00), // Standard suffix
+      String.fromCharCode(0xd2, 0x01), // Alternative suffix
+    ];
+
+    for (const suffix of suffixes) {
+      if (str.endsWith(suffix)) {
+        str = str.substring(0, str.length - suffix.length);
+        break;
+      }
+    }
+
+    // Convert to bytes for length parsing
+    const bytes = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) {
+      bytes[i] = str.charCodeAt(i);
+    }
+
+    if (bytes.length === 0) return null;
+
+    // Parse length byte(s)
+    let urlStart = 1;
+    let urlLength = bytes[0];
+
+    // Handle multi-byte length encoding
+    if (urlLength >= 0x80) {
+      if (bytes.length < 2) return null;
+      // Two-byte length encoding
+      urlLength = bytes[1];
+      urlStart = 2;
+    }
+
+    // Extract the URL
+    if (urlStart + urlLength > str.length) {
+      // Length extends beyond string, try different approach
+      urlLength = str.length - urlStart;
+    }
+
+    const extractedUrl = str.substring(urlStart, urlStart + urlLength);
+
+    // Validate the extracted URL
+    if (extractedUrl && extractedUrl.startsWith("http")) {
+      return extractedUrl;
+    }
+
+    // If that didn't work, try searching for HTTP URLs in the decoded data
+    const urlRegex = /https?:\/\/[^\s\x00-\x1f\x7f-\x9f]+/g;
+    const urls = str.match(urlRegex);
+
+    if (urls && urls.length > 0) {
+      // Return the first valid URL that's not a Google URL
+      for (const url of urls) {
+        if (!url.includes("google.com") && !url.includes("youtube.com")) {
+          return url;
+        }
+      }
+      // If all URLs contain google.com, return the first one anyway
+      return urls[0];
+    }
+
+    return null;
+  } catch (error) {
+    console.error("CBM decode error:", error);
+    return null;
+  }
+};
+
 const decodeGoogleNewsUrl = async (sourceUrl) => {
   const url = new URL(sourceUrl);
   const path = url.pathname.split("/");
@@ -129,54 +215,56 @@ const decodeGoogleNewsUrl = async (sourceUrl) => {
       return redirectedUrl;
     }
 
-    // Try to decode the base64 manually
+    // Try to decode CBM URLs manually
+    if (base64.startsWith("CBM")) {
+      const decodedUrl = decodeCBMUrl(base64);
+      if (
+        decodedUrl &&
+        decodedUrl.startsWith("http") &&
+        !decodedUrl.includes("news.google.com")
+      ) {
+        return decodedUrl;
+      }
+    }
+
+    // For AU_yqL format, try the batchexecute API
     try {
       let str = atob(base64);
-
       const prefix = String.fromCharCode(0x08, 0x13, 0x22);
       if (str.startsWith(prefix)) {
         str = str.substring(prefix.length);
       }
 
-      const suffix = String.fromCharCode(0xd2, 0x01, 0x00);
-      if (str.endsWith(suffix)) {
-        str = str.substring(0, str.length - suffix.length);
-      }
-
-      // One or two bytes to skip
       const bytes = new Uint8Array(str.length);
       for (let i = 0; i < str.length; i++) {
         bytes[i] = str.charCodeAt(i);
       }
-      const len = bytes[0];
-      if (len >= 0x80) {
-        str = str.substring(2, len + 2);
-      } else {
-        str = str.substring(1, len + 1);
-      }
 
-      // If it's old format and we got a URL, return it
-      if (!str.startsWith("AU_yqL") && str.startsWith("http")) {
-        return str;
-      }
+      if (bytes.length > 0) {
+        const len = bytes[0];
+        if (len >= 0x80) {
+          str = str.substring(2, len + 2);
+        } else {
+          str = str.substring(1, len + 1);
+        }
 
-      // For new format (AU_yqL), try the batchexecute API as last resort
-      if (str.startsWith("AU_yqL")) {
-        try {
-          const batchUrl = await fetchDecodedBatchExecute(base64);
-          return batchUrl;
-        } catch (error) {
-          // If batchexecute fails, return the direct article URL
-          console.error("BatchExecute failed:", error.message);
-          return directUrl;
+        if (str.startsWith("AU_yqL")) {
+          try {
+            const batchUrl = await fetchDecodedBatchExecute(base64);
+            if (batchUrl && batchUrl.startsWith("http")) {
+              return batchUrl;
+            }
+          } catch (error) {
+            console.error("BatchExecute failed:", error.message);
+          }
         }
       }
-
-      return str;
     } catch (decodeError) {
       console.error("Manual decode failed:", decodeError.message);
-      return sourceUrl;
     }
+
+    // If all else fails, return the direct Google News URL
+    return directUrl;
   } else {
     return sourceUrl;
   }
