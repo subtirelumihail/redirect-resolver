@@ -1,73 +1,107 @@
-const fetchDecodedBatchExecute = (id) => {
-  const s =
-    '[[["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"' +
-    id +
-    '\\"]",null,"generic"]]]';
+const fetchDecodedBatchExecute = async (id) => {
+  try {
+    const s =
+      '[[["Fbv4je","[\\"garturlreq\\",[[\\"en-US\\",\\"US\\",[\\"FINANCE_TOP_INDICES\\",\\"WEB_TEST_1_0_0\\"],null,null,1,1,\\"US:en\\",null,180,null,null,null,null,null,0,null,null,[1608992183,723341000]],\\"en-US\\",\\"US\\",1,[2,3,4,8],1,0,\\"655000234\\",0,0,null,0],\\"' +
+      id +
+      '\\"]",null,"generic"]]]';
 
-  return fetch(
-    "https://news.google.com/_/DotsSplashUi/data/batchexecute?" +
-      "rpcids=Fbv4je",
-    {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
-        Referrer: "https://news.google.com/",
-      },
-      body: "f.req=" + encodeURIComponent(s),
-      method: "POST",
-    }
-  )
-    .then((e) => e.text())
-    .then((s) => {
-      // Remove the security prefix )]}' if present
-      let responseText = s;
-      if (responseText.startsWith(")]}'\n\n")) {
-        responseText = responseText.substring(6);
+    const response = await fetch(
+      "https://news.google.com/_/DotsSplashUi/data/batchexecute?" +
+        "rpcids=Fbv4je",
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+          Referrer: "https://news.google.com/",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+        body: "f.req=" + encodeURIComponent(s),
+        method: "POST",
       }
+    );
 
-      // Try to parse the JSON response
-      try {
-        const parsed = JSON.parse(responseText);
+    const responseText = await response.text();
 
-        // Look for the URL in the parsed response structure
-        if (parsed && Array.isArray(parsed)) {
-          for (const item of parsed) {
-            if (Array.isArray(item) && item.length >= 3) {
-              const data = item[2];
-              if (typeof data === "string") {
-                try {
-                  const innerParsed = JSON.parse(data);
-                  if (Array.isArray(innerParsed) && innerParsed.length >= 2) {
-                    const url = innerParsed[1];
-                    if (typeof url === "string" && url.startsWith("http")) {
-                      return url;
-                    }
+    // Remove the security prefix )]}' if present
+    let cleanResponse = responseText;
+    if (cleanResponse.startsWith(")]}'\n\n")) {
+      cleanResponse = cleanResponse.substring(6);
+    }
+
+    // Try to parse the JSON response
+    try {
+      const parsed = JSON.parse(cleanResponse);
+
+      // Look for the URL in the parsed response structure
+      if (parsed && Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (Array.isArray(item) && item.length >= 3) {
+            const data = item[2];
+            if (typeof data === "string") {
+              try {
+                const innerParsed = JSON.parse(data);
+                if (Array.isArray(innerParsed) && innerParsed.length >= 2) {
+                  const url = innerParsed[1];
+                  if (typeof url === "string" && url.startsWith("http")) {
+                    return url;
                   }
-                } catch (e) {
-                  // Continue searching
                 }
+              } catch (e) {
+                // Continue searching
               }
             }
           }
         }
-      } catch (parseError) {
-        // Fallback to the original header/footer method
-        const header = '[\\"garturlres\\",\\"';
-        const footer = '\\",';
-        if (!responseText.includes(header)) {
-          throw new Error("header not found: " + responseText);
-        }
-        const start = responseText.substring(
-          responseText.indexOf(header) + header.length
-        );
-        if (!start.includes(footer)) {
-          throw new Error("footer not found");
-        }
-        const url = start.substring(0, start.indexOf(footer));
-        return url;
       }
+    } catch (parseError) {
+      // Fallback to the original header/footer method
+      const header = '[\\"garturlres\\",\\"';
+      const footer = '\\",';
+      if (cleanResponse.includes(header)) {
+        const start = cleanResponse.substring(
+          cleanResponse.indexOf(header) + header.length
+        );
+        if (start.includes(footer)) {
+          const url = start.substring(0, start.indexOf(footer));
+          return url;
+        }
+      }
+    }
 
-      throw new Error("Could not extract URL from response: " + responseText);
+    throw new Error("Google News API returned error or no URL found");
+  } catch (error) {
+    throw new Error("BatchExecute failed: " + error.message);
+  }
+};
+
+const tryDirectGoogleNewsRedirect = async (articleUrl) => {
+  try {
+    const response = await fetch(articleUrl, {
+      method: "HEAD",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      redirect: "manual",
+      signal: AbortSignal.timeout(10000),
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("Location");
+      if (
+        location &&
+        !location.includes("google.com") &&
+        location.startsWith("http")
+      ) {
+        return location;
+      }
+    }
+  } catch (error) {
+    // Ignore errors and try other methods
+  }
+  return null;
 };
 
 const decodeGoogleNewsUrl = async (sourceUrl) => {
@@ -87,37 +121,62 @@ const decodeGoogleNewsUrl = async (sourceUrl) => {
 
   if (articlePath) {
     const base64 = articlePath;
-    let str = atob(base64);
 
-    const prefix = String.fromCharCode(0x08, 0x13, 0x22);
-    if (str.startsWith(prefix)) {
-      str = str.substring(prefix.length);
+    // First, try direct redirect approach
+    const directUrl = `https://news.google.com/articles/${base64}`;
+    const redirectedUrl = await tryDirectGoogleNewsRedirect(directUrl);
+    if (redirectedUrl) {
+      return redirectedUrl;
     }
 
-    const suffix = String.fromCharCode(0xd2, 0x01, 0x00);
-    if (str.endsWith(suffix)) {
-      str = str.substring(0, str.length - suffix.length);
-    }
+    // Try to decode the base64 manually
+    try {
+      let str = atob(base64);
 
-    // One or two bytes to skip
-    const bytes = new Uint8Array(str.length);
-    for (let i = 0; i < str.length; i++) {
-      bytes[i] = str.charCodeAt(i);
-    }
-    const len = bytes[0];
-    if (len >= 0x80) {
-      str = str.substring(2, len + 2);
-    } else {
-      str = str.substring(1, len + 1);
-    }
+      const prefix = String.fromCharCode(0x08, 0x13, 0x22);
+      if (str.startsWith(prefix)) {
+        str = str.substring(prefix.length);
+      }
 
-    if (str.startsWith("AU_yqL")) {
-      // New style encoding, introduced in July 2024. Not yet known how to decode offline.
-      const url = await fetchDecodedBatchExecute(base64);
-      return url;
-    }
+      const suffix = String.fromCharCode(0xd2, 0x01, 0x00);
+      if (str.endsWith(suffix)) {
+        str = str.substring(0, str.length - suffix.length);
+      }
 
-    return str;
+      // One or two bytes to skip
+      const bytes = new Uint8Array(str.length);
+      for (let i = 0; i < str.length; i++) {
+        bytes[i] = str.charCodeAt(i);
+      }
+      const len = bytes[0];
+      if (len >= 0x80) {
+        str = str.substring(2, len + 2);
+      } else {
+        str = str.substring(1, len + 1);
+      }
+
+      // If it's old format and we got a URL, return it
+      if (!str.startsWith("AU_yqL") && str.startsWith("http")) {
+        return str;
+      }
+
+      // For new format (AU_yqL), try the batchexecute API as last resort
+      if (str.startsWith("AU_yqL")) {
+        try {
+          const batchUrl = await fetchDecodedBatchExecute(base64);
+          return batchUrl;
+        } catch (error) {
+          // If batchexecute fails, return the direct article URL
+          console.error("BatchExecute failed:", error.message);
+          return directUrl;
+        }
+      }
+
+      return str;
+    } catch (decodeError) {
+      console.error("Manual decode failed:", decodeError.message);
+      return sourceUrl;
+    }
   } else {
     return sourceUrl;
   }
